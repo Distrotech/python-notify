@@ -1,3 +1,14 @@
+2008-08-08  Paul Pogonyshev  <pogonyshev@gmx.net>
+
+	* notify/bind.py (Binding.__init__, Binding.wrap)
+	(Binding.__call__, Binding.__eq__, Binding.__hash__)
+	(Binding.__to_string, WeakBinding.__init__, WeakBinding)
+	(WeakBinding.__call__): Add keyword support.
+	(Binding._get_keywords): New method.
+	(Binding.im_kwds): New property.
+
+	* notify/utils.py: New class.
+
 2008-08-06  Paul Pogonyshev  <pogonyshev@gmx.net>
 
 	* notify/gc.c (GCProtectorMeta_set_default): Don't decref
