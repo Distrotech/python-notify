@@ -1,3 +1,33 @@
+2008-08-10  Paul Pogonyshev  <pogonyshev@gmx.net>
+
+	* notify/base.py (AbstractValueObject.store)
+	(AbstractValueObject.store_safe)
+	(AbstractValueObject.with_changes_frozen): Add keyword support.
+
+	* notify/mediator.py (FunctionalMediator.__init__)
+	(FunctionalMediator.forward_value)
+	(FunctionalMediator.back_value, FunctionalMediator.reverse)
+	(FunctionalMediator.__eq__, FunctionalMediator.__hash__): Add
+	keyword support.
+	(_identity): Ignore keyword arguments too.
+
+	* notify/signal.py (AbstractSignal.is_connected)
+	(AbstractSignal.is_blocked, AbstractSignal.connect)
+	(AbstractSignal.connect_safe, AbstractSignal._wrap_handler)
+	(AbstractSignal.disconnect, AbstractSignal.disconnect_all)
+	(AbstractSignal.block, AbstractSignal.unblock)
+	(AbstractSignal.emit, AbstractSignal.__call__)
+	(Signal.is_connected, Signal.is_blocked, Signal.disconnect)
+	(Signal.disconnect_all, Signal.block, Signal.unblock, Signal.emit)
+	(CleanSignal.disconnect, CleanSignal.disconnect_all)
+	(CleanSignal._wrap_handler): Add keyword support.
+
+	* notify/_2_5/base.py (storing, storing_safely): Add keyword
+	support.
+
+	* notify/_2_5/signal.py (connecting, connecting_safely)
+	(blocking): Add keyword support.
+
 2008-08-08  Paul Pogonyshev  <pogonyshev@gmx.net>
 
 	* notify/bind.py (Binding.__init__, Binding.wrap)
@@ -7,7 +37,7 @@
 	(Binding._get_keywords): New method.
 	(Binding.im_kwds): New property.
 
-	* notify/utils.py: New class.
+	* notify/utils.py (frozendict): New class.
 
 2008-08-06  Paul Pogonyshev  <pogonyshev@gmx.net>
 
