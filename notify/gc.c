@@ -30,16 +30,33 @@
 #  define Compatibility_CLEAR(object) Py_CLEAR (object)
 #else
 #  define Compatibility_CLEAR(object)                   \
-      do                                                \
-        {                                               \
-          if (object)                                   \
-            {                                           \
-              PyObject *temp = (PyObject *) (object);   \
-              (object) = NULL;                          \
-              Py_DECREF (temp);                         \
-            }                                           \
-        }                                               \
-      while (0)
+     do                                                 \
+       {                                                \
+         if (object)                                    \
+           {                                            \
+             PyObject *temp = (PyObject *) (object);    \
+             (object) = NULL;                           \
+             Py_DECREF (temp);                          \
+           }                                            \
+       }                                                \
+     while (0)
+#endif
+
+/* Py_VISIT is not available in 2.3. */
+#ifdef Py_VISIT
+#  define Compatibility_VISIT(object) Py_VISIT (object)
+#else
+#  define Compatibility_VISIT(object)                           \
+     do                                                         \
+       {                                                        \
+         if (object)                                            \
+           {                                                    \
+             int result = visit ((PyObject *) (object), arg);   \
+             if (result)                                        \
+               return result;                                   \
+           }                                                    \
+       }                                                        \
+     while (0)
 #endif
 
 
@@ -61,7 +78,14 @@
 #endif
 
 
-/* Again working around changes in Py3k. */
+#ifdef Py_TPFLAGS_HAVE_VERSION_TAG
+#  define Compatibility_TPFLAGS_HAVE_VERSION_TAG Py_TPFLAGS_HAVE_VERSION_TAG
+#else
+#  define Compatibility_TPFLAGS_HAVE_VERSION_TAG 0
+#endif
+
+
+/* Working around more changes in Py3k: module initialization. */
 #ifdef PyMODINIT_FUNC
 #  define Compatibility_MODINIT_FUNC PyMODINIT_FUNC
 #else
@@ -71,6 +95,64 @@
 #    define Compatibility_MODINIT_FUNC void
 #  endif
 #endif
+
+
+#ifdef PyModuleDef_HEAD_INIT
+
+#  define Compatibility_ModuleDef                 PyModuleDef
+#  define Compatibility_ModuleDef_HEAD_INIT       PyModuleDef_HEAD_INIT
+#  define Compatibility_MODINIT_FUNC_NAME(module) PyInit_##module
+
+#  define Compatibility_ModuleCreate(definition)  PyModule_Create (definition)
+#  define Compatibility_ModulePostCreate(module, definition)     \
+     (PyModule_AddStringConstant ((module), "__docformat__",     \
+                                  "epytext en") == 0)
+
+#  define Compatibility_ModuleReturn(module)      return (module)
+
+#  define Compatibility_ModuleState(def, module, type)           \
+     ((type *) PyModule_GetState (module))
+#  define Compatibility_ModuleStateFromDef(def, type)            \
+     ((type *) PyModule_GetState (PyState_FindModule (&def)))
+
+#else  /* !defined PyMODINIT_FUNC */
+
+typedef
+struct
+{
+  const int      dummy;
+  const char    *m_name;
+  const char    *m_doc;
+  int            m_size;
+  PyMethodDef   *m_methods;
+  inquiry        m_reload;
+  traverseproc   m_traverse;
+  inquiry        m_clear;
+  freefunc       m_free;
+}
+Compatibility_ModuleDef;
+
+#  define Compatibility_ModuleDef_HEAD_INIT       0
+#  define Compatibility_MODINIT_FUNC_NAME(module) init##module
+
+#  define Compatibility_ModuleCreate(definition)                        \
+     Py_InitModule ((char *) (definition)->m_name, NULL)
+#  define Compatibility_ModulePostCreate(module, definition)            \
+     (PyModule_AddStringConstant ((module), "__doc__",                  \
+                                  (char *) (definition)->m_doc) == 0    \
+      && PyModule_AddStringConstant ((module), "__docformat__",         \
+                                     "epytext en") == 0)
+
+#  define Compatibility_ModuleReturn(module)      return
+
+#  define Compatibility_ModuleState(def, module, type)                  \
+     (&__2_x_state__##def)
+#  define Compatibility_ModuleStateFromDef(def, type)                   \
+     (&__2_x_state__##def)
+#  define Compatibility_2_x_MODULE_STATE          1
+  
+
+#endif  /* !defined PyMODINIT_FUNC */
 
 
 /* Also compatibility, but let's avoid long name in this case. */
@@ -83,10 +165,8 @@
 /* Hide difference between old strings and Unicode strings used in Py3k. */
 #if defined (PY_MAJOR_VERSION) && PY_MAJOR_VERSION >= 3
 #  define Compatibility_String_FromString PyUnicode_FromString
-#  define Compatibility_String_AsString   PyUnicode_AsString
 #else
 #  define Compatibility_String_FromString PyString_FromString
-#  define Compatibility_String_AsString   PyString_AsString
 #endif
 
 
@@ -106,6 +186,7 @@ typedef
 struct
 {
   PyObject_HEAD
+  /* Note: no cyclic GC support is needed, because this dict is for internal use only. */
   PyObject *  protected_objects_dict;
   long int    num_active_protections;
 }
@@ -113,6 +194,17 @@ RaisingGCProtector;
 
 
 typedef  RaisingGCProtector  DebugGCProtector;
+
+
+typedef
+struct
+{
+  PyObject *  raise_not_implemented_exception;
+  PyObject *  unprotection_error_type;
+  PyObject *  default_protector;
+  PyObject *  default_attribute_name;
+}
+GCModuleState;
 
 
 
@@ -160,6 +252,10 @@ static PyObject *   RaisingGCProtector_get_num_active_protections
 static PyObject *   DebugGCProtector_unprotect      (DebugGCProtector *self,
                                                      PyObject *arguments, PyObject *keywords);
 
+static int          gc_module_initialize_state      (PyObject *self);
+static int          gc_module_traverse              (PyObject *self, visitproc visit, void *arg);
+static int          gc_module_clear                 (PyObject *self);
+
 
 
 /*- Documentation --------------------------------------------------*/
@@ -175,12 +271,11 @@ This module defines both a simple L{interface <AbstractGCProtector>} and several
 implementations, some, which are suitable for production use (C{L{FastGCProtector}}), \
 some for debugging purposes (C{L{RaisingGCProtector}}, C{L{DebugGCProtector}}.)\n\
 \n\
-Py-notify classes use value of the C{L{AbstractGCProtector.default}} variable as the \
-protector instance.  In case you run into a problem, \
-use C{L{AbstractGCProtector.set_default}} static method somewhere near your program beginning \
-to set it to an instance of C{DebugGCProtector} or a similar class to track the problem down. \
-However, we believe that Py-notify classes must not cause problems themselves, they may pop up \
-only if you use a garbage-collection protector yourself."
+Py-notify classes use value of the C{AbstractGCProtector.default} variable as the \
+protector instance.  In case you run into a problem, set it to an instance of \
+C{DebugGCProtector} or a similar class to track the problem down (somewhere near your \
+program beginning).  However, we believe that Py-notify classes must not cause problems \
+themselves, they may pop up only if you use a garbage-collection protector yourself."
 
 
 #define UNPROTECTION_ERROR_DOC "\
@@ -311,12 +406,12 @@ various protection information.\n\
 
 /*- Types ----------------------------------------------------------*/
 
-PyGetSetDef  GCProtectorMeta_properties[]
+static PyGetSetDef  GCProtectorMeta_properties[]
   = { { "default", GCProtectorMeta_get_default, GCProtectorMeta_set_default,
         GC_PROTECTOR_META_DEFAULT_DOC, NULL },
       { NULL, NULL, NULL, NULL, NULL } };
 
-PyTypeObject  GCProtectorMeta_Type
+static PyTypeObject  GCProtectorMeta_Type
   = { Compatibility_VarObject_HEAD_INIT (0)
       "notify.gc.GCProtectorMeta",                   /* tp_name           */
       sizeof (PyHeapTypeObject),                     /* tp_basicsize      */
@@ -336,7 +431,8 @@ PyTypeObject  GCProtectorMeta_Type
       (getattrofunc)   0,                            /* tp_getattro       */
       GCProtectorMeta_setattro,                      /* tp_setattro       */
       0,                                             /* tp_as_buffer      */
-      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,      /* tp_flags          */
+      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Compatibility_TPFLAGS_HAVE_VERSION_TAG,
+                                                     /* tp_flags          */
       GC_PROTECTOR_META_DOC,                         /* tp_doc            */
       (traverseproc)   0,                            /* tp_traverse       */
       (inquiry)        0,                            /* tp_clear          */
@@ -361,7 +457,7 @@ PyTypeObject  GCProtectorMeta_Type
     };
 
 
-PyMethodDef  AbstractGCProtector_methods[]
+static PyMethodDef  AbstractGCProtector_methods[]
   = { { "protect",     (PyCFunction) AbstractGCProtector_protect,
         METH_VARARGS | METH_KEYWORDS,             ABSTRACT_GC_PROTECTOR_PROTECT_DOC },
       { "unprotect",   (PyCFunction) AbstractGCProtector_unprotect,
@@ -370,7 +466,7 @@ PyMethodDef  AbstractGCProtector_methods[]
         METH_VARARGS | METH_KEYWORDS | METH_STATIC, ABSTRACT_GC_PROTECTOR_SET_DEFAULT_DOC },
       { NULL, NULL, 0, NULL } };
 
-PyTypeObject  AbstractGCProtector_Type
+static PyTypeObject  AbstractGCProtector_Type
   = { Compatibility_VarObject_HEAD_INIT (0)
       "notify.gc.AbstractGCProtector",               /* tp_name           */
       sizeof (PyObject),                             /* tp_basicsize      */
@@ -390,7 +486,8 @@ PyTypeObject  AbstractGCProtector_Type
       (getattrofunc)   0,                            /* tp_getattro       */
       (setattrofunc)   0,                            /* tp_setattro       */
       0,                                             /* tp_as_buffer      */
-      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,      /* tp_flags          */
+      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Compatibility_TPFLAGS_HAVE_VERSION_TAG,
+                                                     /* tp_flags          */
       ABSTRACT_GC_PROTECTOR_DOC,                     /* tp_doc            */
       (traverseproc)   0,                            /* tp_traverse       */
       (inquiry)        0,                            /* tp_clear          */
@@ -415,19 +512,19 @@ PyTypeObject  AbstractGCProtector_Type
     };
 
 
-PyMethodDef  FastGCProtector_methods[]
+static PyMethodDef  FastGCProtector_methods[]
   = { { "protect",     (PyCFunction) FastGCProtector_protect,
         METH_VARARGS | METH_KEYWORDS, FAST_GC_PROTECTOR_PROTECT_DOC },
       { "unprotect",   (PyCFunction) FastGCProtector_unprotect,
         METH_VARARGS | METH_KEYWORDS, FAST_GC_PROTECTOR_UNPROTECT_DOC },
       { NULL, NULL, 0, NULL } };
 
-PyGetSetDef  FastGCProtector_properties[]
+static PyGetSetDef  FastGCProtector_properties[]
   = { { "num_active_protections", (getter) FastGCProtector_get_num_active_protections, NULL,
         FAST_GC_PROTECTOR_NUM_ACTIVE_PROTECTIONS_DOC, NULL },
       { NULL, NULL, NULL, NULL, NULL } };
 
-PyTypeObject  FastGCProtector_Type
+static PyTypeObject  FastGCProtector_Type
   = { Compatibility_VarObject_HEAD_INIT (0)
       "notify.gc.FastGCProtector",                   /* tp_name           */
       sizeof (FastGCProtector),                      /* tp_basicsize      */
@@ -447,7 +544,8 @@ PyTypeObject  FastGCProtector_Type
       (getattrofunc)   0,                            /* tp_getattro       */
       (setattrofunc)   0,                            /* tp_setattro       */
       0,                                             /* tp_as_buffer      */
-      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,      /* tp_flags          */
+      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Compatibility_TPFLAGS_HAVE_VERSION_TAG,
+                                                     /* tp_flags          */
       FAST_GC_PROTECTOR_DOC,                         /* tp_doc            */
       (traverseproc)   0,                            /* tp_traverse       */
       (inquiry)        0,                            /* tp_clear          */
@@ -472,7 +570,7 @@ PyTypeObject  FastGCProtector_Type
     };
 
 
-PyMethodDef  RaisingGCProtector_methods[]
+static PyMethodDef  RaisingGCProtector_methods[]
   = { { "protect",     (PyCFunction) RaisingGCProtector_protect,
         METH_VARARGS | METH_KEYWORDS, RAISING_GC_PROTECTOR_PROTECT_DOC },
       { "unprotect",   (PyCFunction) RaisingGCProtector_unprotect,
@@ -481,14 +579,14 @@ PyMethodDef  RaisingGCProtector_methods[]
         METH_VARARGS | METH_KEYWORDS, RAISING_GC_PROTECTOR_GET_NUM_OBJECT_PROTECTIONS },
       { NULL, NULL, 0, NULL } };
 
-PyGetSetDef  RaisingGCProtector_properties[]
+static PyGetSetDef  RaisingGCProtector_properties[]
   = { { "num_protected_objects", (getter) RaisingGCProtector_get_num_protected_objects, NULL,
         RAISING_GC_PROTECTOR_NUM_PROTECTED_OBJECTS_DOC, NULL },
       { "num_active_protections", (getter) RaisingGCProtector_get_num_active_protections, NULL,
         RAISING_GC_PROTECTOR_NUM_ACTIVE_PROTECTIONS_DOC, NULL },
       { NULL, NULL, NULL, NULL, NULL } };
 
-PyTypeObject  RaisingGCProtector_Type
+static PyTypeObject  RaisingGCProtector_Type
   = { Compatibility_VarObject_HEAD_INIT (0)
       "notify.gc.RaisingGCProtector",                /* tp_name           */
       sizeof (RaisingGCProtector),                   /* tp_basicsize      */
@@ -508,7 +606,8 @@ PyTypeObject  RaisingGCProtector_Type
       (getattrofunc)   0,                            /* tp_getattro       */
       (setattrofunc)   0,                            /* tp_setattro       */
       0,                                             /* tp_as_buffer      */
-      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,      /* tp_flags          */
+      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Compatibility_TPFLAGS_HAVE_VERSION_TAG,
+                                                     /* tp_flags          */
       RAISING_GC_PROTECTOR_DOC,                      /* tp_doc            */
       (traverseproc)   0,                            /* tp_traverse       */
       (inquiry)        0,                            /* tp_clear          */
@@ -533,12 +632,12 @@ PyTypeObject  RaisingGCProtector_Type
     };
 
 
-PyMethodDef  DebugGCProtector_methods[]
+static PyMethodDef  DebugGCProtector_methods[]
   = { { "unprotect",   (PyCFunction) DebugGCProtector_unprotect,
         METH_VARARGS | METH_KEYWORDS, DEBUG_GC_PROTECTOR_UNPROTECT_DOC },
       { NULL, NULL, 0, NULL } };
 
-PyTypeObject  DebugGCProtector_Type
+static PyTypeObject  DebugGCProtector_Type
   = { Compatibility_VarObject_HEAD_INIT (0)
       "notify.gc.DebugGCProtector_Type",             /* tp_name           */
       sizeof (DebugGCProtector),                     /* tp_basicsize      */
@@ -558,7 +657,8 @@ PyTypeObject  DebugGCProtector_Type
       (getattrofunc)   0,                            /* tp_getattro       */
       (setattrofunc)   0,                            /* tp_setattro       */
       0,                                             /* tp_as_buffer      */
-      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,      /* tp_flags          */
+      Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Compatibility_TPFLAGS_HAVE_VERSION_TAG,
+                                                     /* tp_flags          */
       DEBUG_GC_PROTECTOR_DOC,                        /* tp_doc            */
       (traverseproc)   0,                            /* tp_traverse       */
       (inquiry)        0,                            /* tp_clear          */
@@ -586,15 +686,28 @@ PyTypeObject  DebugGCProtector_Type
 
 /*- Static variables -----------------------------------------------*/
 
-static PyObject *  raise_not_implemented_exception = NULL;
+static Compatibility_ModuleDef  gc_module
+  = { Compatibility_ModuleDef_HEAD_INIT,
+      "notify.gc",
+      MODULE_DOC,
+      sizeof (GCModuleState),
+      NULL,
+      NULL,
+      gc_module_traverse,
+      gc_module_clear,
+      NULL };
 
-static char *      no_keywords[]           = { NULL };
-static char *      object_keywords[]       = { "object", NULL };
+#define GC_MODULE_STATE(module)    Compatibility_ModuleState (gc_module, module, GCModuleState)
+#define GC_MODULE_STATE_FROM_DEF() Compatibility_ModuleStateFromDef (gc_module, GCModuleState)
 
-static PyObject *  unprotection_error_type = NULL;
+#if Compatibility_2_x_MODULE_STATE
+static GCModuleState __2_x_state__gc_module
+  = { NULL, NULL, NULL, NULL };
+#endif
 
-static PyObject *  default_protector       = NULL;
-static PyObject *  default_attribute_name  = NULL;
+
+static char *  no_keywords[]     = { NULL };
+static char *  object_keywords[] = { "object", NULL };
 
 
 
@@ -603,7 +716,9 @@ static PyObject *  default_attribute_name  = NULL;
 static int
 GCProtectorMeta_setattro (PyObject *type, PyObject *name, PyObject *value)
 {
-  switch (PyObject_RichCompareBool (name, default_attribute_name, Py_EQ))
+  GCModuleState *state = GC_MODULE_STATE_FROM_DEF ();
+
+  switch (PyObject_RichCompareBool (name, state->default_attribute_name, Py_EQ))
     {
     case 1:
       return PyObject_GenericSetAttr (type, name, value);
@@ -620,21 +735,26 @@ GCProtectorMeta_setattro (PyObject *type, PyObject *name, PyObject *value)
 static PyObject *
 GCProtectorMeta_get_default (PyObject *type, void *context)
 {
-  Py_INCREF (default_protector);
-  return default_protector;
+  GCModuleState *state = GC_MODULE_STATE_FROM_DEF ();
+
+  Py_INCREF (state->default_protector);
+  return state->default_protector;
 }
 
 static int
 GCProtectorMeta_set_default (PyObject *type, PyObject *value, void *context)
 {
-  if (value == default_protector)
+  GCModuleState *state             = GC_MODULE_STATE_FROM_DEF ();
+  PyObject      *current_protector = state->default_protector;
+
+  if (value == current_protector)
     return 0;
 
   switch (PyObject_IsInstance (value, (PyObject *) &AbstractGCProtector_Type))
     {
     case 1:
       {
-        PyObject *num_active_protections = PyObject_GetAttrString (default_protector,
+        PyObject *num_active_protections = PyObject_GetAttrString (current_protector,
                                                                    "num_active_protections");
 
         if (num_active_protections)
@@ -647,18 +767,24 @@ GCProtectorMeta_set_default (PyObject *type, PyObject *value, void *context)
 
               case 1:
                 {
-                  PyObject *as_string = PyObject_Str (num_active_protections);
+                  long  num_active_protections_long = PyLong_AsLong (num_active_protections);
 
-                  if (as_string)
+                  if (PyErr_Occurred ())
+                    {
+                      PyErr_Clear ();
+                      num_active_protections_long = 0;
+                    }
+
+                  if (num_active_protections_long
+                      && (int) num_active_protections_long == num_active_protections_long)
                     {
                       PyErr_Format (PyExc_ValueError,
                                     ("cannot set a different GC protector: current has active "
-                                     "protections (num_active_protections = %.200s)"),
-                                    Compatibility_String_AsString (as_string));
+                                     "protections (num_active_protections = %d)"),
+                                    (int) num_active_protections_long);
                     }
                   else
                     {
-                      PyErr_Clear ();
                       PyErr_SetString (PyExc_ValueError, ("cannot set a different GC protector: "
                                                           "current has active protections"));
                     }
@@ -675,10 +801,10 @@ GCProtectorMeta_set_default (PyObject *type, PyObject *value, void *context)
             PyErr_Clear ();
           }
 
-        Py_DECREF (default_protector);
+        state->default_protector = value;
 
-        default_protector = value;
-        Py_INCREF (default_protector);
+        Py_INCREF (value);
+        Py_DECREF (current_protector);
 
         return 0;
       }
@@ -708,28 +834,30 @@ AbstractGCProtector_dealloc (PyObject *self)
 static PyObject *
 AbstractGCProtector_protect (PyObject *self, PyObject *arguments, PyObject *keywords)
 {
-  PyObject *object;
+  GCModuleState *state = GC_MODULE_STATE_FROM_DEF ();
+  PyObject      *object;
 
   if (!PyArg_ParseTupleAndKeywords (arguments, keywords,
                                     "O:notify.gc.AbstractGCProtector.protect",
                                     object_keywords, &object))
     return NULL;
 
-  return PyObject_CallFunction (raise_not_implemented_exception, "Os", self, "protect");
+  return PyObject_CallFunction (state->raise_not_implemented_exception, "Os", self, "protect");
 }
 
 
 static PyObject *
 AbstractGCProtector_unprotect (PyObject *self, PyObject *arguments, PyObject *keywords)
 {
-  PyObject *object;
+  GCModuleState *state = GC_MODULE_STATE_FROM_DEF ();
+  PyObject      *object;
 
   if (!PyArg_ParseTupleAndKeywords (arguments, keywords,
                                     "O:notify.gc.AbstractGCProtector.unprotect",
                                     object_keywords, &object))
     return NULL;
 
-  return PyObject_CallFunction (raise_not_implemented_exception, "Os", self, "unprotect");
+  return PyObject_CallFunction (state->raise_not_implemented_exception, "Os", self, "unprotect");
 }
 
 
@@ -912,7 +1040,8 @@ RaisingGCProtector_protect (RaisingGCProtector *self, PyObject *arguments, PyObj
 static PyObject *
 RaisingGCProtector_unprotect (RaisingGCProtector *self, PyObject *arguments, PyObject *keywords)
 {
-  PyObject *object;
+  GCModuleState *state = GC_MODULE_STATE_FROM_DEF ();
+  PyObject      *object;
 
   if (!PyArg_ParseTupleAndKeywords (arguments, keywords,
                                     "O:notify.gc.RaisingGCProtector.unprotect",
@@ -968,7 +1097,7 @@ RaisingGCProtector_unprotect (RaisingGCProtector *self, PyObject *arguments, PyO
           else
             type_name = "?";
 
-          PyErr_Format (unprotection_error_type,
+          PyErr_Format (state->unprotection_error_type,
                         "object is not protected by this %s", type_name);
 
           Py_DECREF (id);
@@ -1059,6 +1188,101 @@ DebugGCProtector_unprotect (DebugGCProtector *self, PyObject *arguments, PyObjec
 
 
 
+/*- Module functions -----------------------------------------------*/
+
+static int
+gc_module_initialize_state (PyObject *self)
+{
+  GCModuleState *state                         = GC_MODULE_STATE (self);
+  PyObject      *dictionary                    = PyModule_GetDict (self);
+  PyObject      *utilities                     = NULL;
+  PyObject      *unprotection_error_dictionary = NULL;
+
+  if (!dictionary)
+    goto error;
+
+  state->default_attribute_name = Compatibility_String_FromString ("default");
+  if (!state->default_attribute_name)
+    goto error;
+
+  utilities = PyImport_ImportModule ("notify.utils");
+  if (!utilities)
+    goto error;
+
+  state->raise_not_implemented_exception
+    = PyDict_GetItemString (PyModule_GetDict (utilities), "raise_not_implemented_exception");
+
+  Py_DECREF (utilities);
+
+  if (state->raise_not_implemented_exception)
+    Py_INCREF (state->raise_not_implemented_exception);
+  else
+    {
+      if (!PyErr_Occurred ())
+        {
+          PyErr_SetString (PyExc_ImportError,
+                           ("notify.gc: cannot import "
+                            "raise_not_implemented_exception from notify.utils"));
+        }
+
+      goto error;
+    }
+
+  unprotection_error_dictionary = Py_BuildValue ("{ss}", "__doc__", UNPROTECTION_ERROR_DOC);
+  if (!unprotection_error_dictionary)
+    goto error;
+
+  state->unprotection_error_type = PyErr_NewException ("notify.gc.UnprotectionError",
+                                                       PyExc_ValueError,
+                                                       unprotection_error_dictionary);
+  if (!state->unprotection_error_type)
+    goto error;
+
+  if (PyDict_SetItemString (dictionary, "UnprotectionError", state->unprotection_error_type) == -1)
+    goto error;
+
+  state->default_protector = FastGCProtector_new ();
+  if (!state->default_protector)
+    goto error;
+
+  return 0;
+
+ error:
+  Py_XDECREF (utilities);
+  Py_XDECREF (unprotection_error_dictionary);
+  gc_module_clear (self);
+
+  return -1;
+}
+
+static int
+gc_module_traverse (PyObject *self, visitproc visit, void *arg)
+{
+  GCModuleState *state = GC_MODULE_STATE (self);
+
+  Compatibility_VISIT (state->raise_not_implemented_exception);
+  Compatibility_VISIT (state->unprotection_error_type);
+  Compatibility_VISIT (state->default_protector);
+  Compatibility_VISIT (state->default_attribute_name);
+
+  return 0;
+}
+
+static int
+gc_module_clear (PyObject *self)
+{
+  GCModuleState *state = GC_MODULE_STATE (self);
+
+  Compatibility_CLEAR (state->raise_not_implemented_exception);
+  Compatibility_CLEAR (state->unprotection_error_type);
+  Compatibility_CLEAR (state->default_protector);
+  Compatibility_CLEAR (state->default_attribute_name);
+
+  return 0;
+}
+
+
+
 /*- Module initialization ------------------------------------------*/
 
 #define REGISTER_TYPE(dictionary, type, meta_type, name, error_label)   \
@@ -1077,55 +1301,25 @@ DebugGCProtector_unprotect (DebugGCProtector *self, PyObject *arguments, PyObjec
 
 
 Compatibility_MODINIT_FUNC
-initgc (void)
+Compatibility_MODINIT_FUNC_NAME (gc) (void)
 {
-  PyObject *module                        = NULL;
+  PyObject *module = NULL;
   PyObject *dictionary;
-  PyObject *utilities                     = NULL;
-  PyObject *unprotection_error_dictionary = NULL;
 
-  module = Py_InitModule ("notify.gc", NULL);
+  module = Compatibility_ModuleCreate (&gc_module);
   if (!module)
+    goto error;
+
+  /* PEP 3121 claims that the state will be zero-initialized, but at least currently this
+   * doesn't happen.  Maybe a bug in Py3k.
+   */
+  memset (GC_MODULE_STATE (module), 0, sizeof (GCModuleState));
+
+  if (!Compatibility_ModulePostCreate (module, &gc_module))
     goto error;
 
   dictionary = PyModule_GetDict (module);
   if (!dictionary)
-    goto error;
-
-  default_attribute_name = Compatibility_String_FromString ("default");
-  if (!default_attribute_name)
-    goto error;
-
-  utilities = PyImport_ImportModule ("notify.utils");
-  if (!utilities)
-    goto error;
-
-  raise_not_implemented_exception = PyDict_GetItemString (PyModule_GetDict (utilities),
-                                                          "raise_not_implemented_exception");
-  if (!raise_not_implemented_exception)
-    {
-      if (!PyErr_Occurred ())
-        {
-          PyErr_SetString (PyExc_ImportError,
-                           ("notify.gc: cannot import "
-                            "raise_not_implemented_exception from notify.utils"));
-        }
-
-      goto error;
-    }
-
-  Py_DECREF (utilities);
-
-  unprotection_error_dictionary = Py_BuildValue ("{ss}", "__doc__", UNPROTECTION_ERROR_DOC);
-  if (!unprotection_error_dictionary)
-    goto error;
-
-  unprotection_error_type = PyErr_NewException ("notify.gc.UnprotectionError",
-                                                PyExc_ValueError, unprotection_error_dictionary);
-  if (!unprotection_error_type)
-    goto error;
-
-  if (PyDict_SetItemString (dictionary, "UnprotectionError", unprotection_error_type) == -1)
     goto error;
 
   GCProtectorMeta_Type.tp_base = &PyType_Type;
@@ -1138,25 +1332,16 @@ initgc (void)
   REGISTER_TYPE (dictionary, RaisingGCProtector_Type,  PyType_Type, "RaisingGCProtector",  error);
   REGISTER_TYPE (dictionary, DebugGCProtector_Type,    PyType_Type, "DebugGCProtector",    error);
 
-  default_protector = FastGCProtector_new ();
-  if (!default_protector)
+  if (gc_module_initialize_state (module) == -1)
     goto error;
 
-  if (PyModule_AddStringConstant (module, "__doc__", MODULE_DOC) == -1)
-    goto error;
-  if (PyModule_AddStringConstant (module, "__docformat__", "epytext en") == -1)
-    goto error;
-
-  return;
+  goto do_return;
 
  error:
+  Compatibility_CLEAR (module);
 
-  Py_XDECREF (module);
-  Py_XDECREF (utilities);
-  Py_XDECREF (unprotection_error_dictionary);
-  Py_XDECREF (raise_not_implemented_exception);
-  Py_XDECREF (unprotection_error_type);
-  Py_XDECREF (default_protector);
+ do_return:
+  Compatibility_ModuleReturn (module);
 }
 
 
