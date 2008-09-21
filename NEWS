@@ -1,3 +1,11 @@
+--- New in Py-notify 0.2.1 -------------------------------------------
+
+* Updated to compile and work with Python 3.0rc1.
+
+* A few minor fixes for potential bugs and optimizations in
+  `notify.gc' module and in documentation.
+
+
 ### New in Py-notify 0.2.0 ###########################################
 
 * First stable version.  158/180 unit tests.  All pass with Python

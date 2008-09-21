@@ -1,5 +1,9 @@
 2008-09-21  Paul Pogonyshev  <pogonyshev@gmx.net>
 
+	* version: Release 0.2.1.
+
+	* NEWS: Update.
+
 	* notify/gc.c (MODULE_DOC): Update:
 	`AbstractGCProtector.set_default' was deprecated a while ago.
 
